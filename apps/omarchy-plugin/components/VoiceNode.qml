@@ -43,7 +43,9 @@ Item {
   // breath on a fixed rhythm, not a microphone level; thinking uses the
   // scanner below, and speaking switches to the measured TTS envelope.
   property real level: 0
-  property real presence: lit ? 1 : 0
+  // Dormant keeps a dim resting glow so Marvis stays visibly "home";
+  // all motion is gated on `lit`, so idle cost is a static frame.
+  property real presence: lit ? 1 : 0.22
   // A second, much slower cycle keeps the active listening/thinking surface
   // from feeling like a static lamp. It changes atmosphere only; it still
   // makes no claim about audio.
@@ -195,7 +197,7 @@ Item {
     implicitHeight: Style.space(240)
     // Stay mapped through the fade, then release the surface rather than
     // leaving a permanently mapped overlay on the output.
-    visible: root.lit || root.presence > 0.001
+    visible: root.presence > 0.001
     exclusionMode: ExclusionMode.Ignore
     mask: Region {}
     WlrLayershell.layer: WlrLayer.Overlay

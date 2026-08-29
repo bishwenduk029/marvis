@@ -36,6 +36,12 @@ fn broadcast_raw(clients: &Clients, line: &str) {
 }
 
 fn broadcast(clients: &Clients, event: &Event) {
+    // Errors surface as replies; log them so failures aren't silent.
+    if let Event::Reply(text) = event {
+        if text.starts_with('(') {
+            eprintln!("marvis-daemon: turn error: {text}");
+        }
+    }
     let value = match event {
         Event::Energy(v) => serde_json::json!(v),
         _ => serde_json::json!(event.value()),
@@ -111,6 +117,15 @@ fn handle_client(
 }
 
 fn main() {
+    // genai's OpenRouter adapter reads OPEN_ROUTER_API_KEY; accept the more
+    // common OPENROUTER_API_KEY spelling too.
+    if let (Ok(k), Err(_)) = (
+        std::env::var("OPENROUTER_API_KEY"),
+        std::env::var("OPEN_ROUTER_API_KEY"),
+    ) {
+        std::env::set_var("OPEN_ROUTER_API_KEY", k);
+    }
+
     let path = socket_path();
     if path.exists() {
         let _ = std::fs::remove_file(&path);
