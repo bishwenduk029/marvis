@@ -34,8 +34,13 @@ jobs:
 
       - name: Syntax-check JS
         run: |
+          # QML .js files start with `.pragma library` — strip that line,
+          # which is a QML directive, not valid JS.
           for f in apps/omarchy-plugin/components/*.js; do
-            node --check "$f"
+            tmp=$(mktemp)
+            sed '/^\.pragma library$/d' "$f" > "$tmp"
+            node --check "$tmp"
+            rm "$tmp"
           done
 
       - name: Pack plugin
