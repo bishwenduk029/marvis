@@ -132,3 +132,11 @@ RAM. Every entry here was paid for in real debugging time.
 - Next, in value order: sentence-chunked TTS → local LLM via llama.cpp
   (LFM 2.5 2.6B GGUF would make it fully offline) → JARVIS tools (hypr/agent/
   open) as an opt-in harness → packaging (systemd user service + installer).
+
+## Parked (deliberate, revisit)
+
+- **Conversation mode**: after her reply, auto-relisten ~5s so the user never
+  clicks mid-conversation. Blocked by self-hearing: speakers → mic → she
+  transcribes her own voice (no AEC on this laptop). Viable with headphones
+  first, or with PipeWire echo-cancel module (load-module echo-cancel).
+- Persistent idle glow shipped (VoiceNode presence 0.22 in dormant).
