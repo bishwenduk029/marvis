@@ -1,0 +1,8 @@
+singleton MarvisStore 1.0 MarvisStore.qml
+AnswerCurtain 1.0 AnswerCurtain.qml
+ActivityFilament 1.0 ActivityFilament.qml
+ResponseActivityBorder 1.0 ResponseActivityBorder.qml
+StateLightBar 1.0 StateLightBar.qml
+ThinkingScanner 1.0 ThinkingScanner.qml
+VoiceNode 1.0 VoiceNode.qml
+VoiceWave 1.0 VoiceWave.qml

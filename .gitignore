@@ -1,0 +1,10 @@
+# build artifacts
+target/
+gen/
+node_modules/
+*.log
+.DS_Store
+
+# agent tooling (not part of the app)
+.agents/
+skills-lock.json

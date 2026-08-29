@@ -1,0 +1,10 @@
+[package]
+name = "marvis-engine"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marvis-common = { path = "../common" }
+marvis-stt = { path = "../stt" }
+marvis-tts = { path = "../tts" }
+marvis-harness = { path = "../harness" }

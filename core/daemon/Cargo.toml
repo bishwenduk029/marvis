@@ -1,0 +1,8 @@
+[package]
+name = "marvis-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marvis-engine = { path = "../engine" }
+serde_json = { workspace = true }

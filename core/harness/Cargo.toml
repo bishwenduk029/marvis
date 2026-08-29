@@ -1,0 +1,9 @@
+[package]
+name = "marvis-harness"
+version.workspace = true
+edition = "2021"
+
+[dependencies]
+pi_agent_rust = { version = "0.3", default-features = false }
+# Runtime used to block on the SDK's async API; same version the SDK pins.
+asupersync = { version = "0.4.4", default-features = false }

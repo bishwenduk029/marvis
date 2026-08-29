@@ -1,0 +1,9 @@
+[package]
+name = "marvis-stt"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+marvis-common = { path = "../common" }
+cpal = { workspace = true }
+sherpa-onnx = { workspace = true }

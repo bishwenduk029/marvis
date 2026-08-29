@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "dev.marvis.app",
+  "name": "Marvis",
+  "version": "0.1.0",
+  "author": "Marvis",
+  "license": "MIT",
+  "description": "Marvis voice assistant as an ambient Omarchy surface: a light node on the focused output, a live transcript, and the reply in a curtain, driven by the Marvis daemon over a Unix socket.",
+  "kinds": ["bar-widget", "overlay"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "barWidget": "BarWidget.qml",
+    "overlay": "Ambient.qml"
+  },
+  "barWidget": {
+    "displayName": "Marvis",
+    "description": "One bar icon that starts and interrupts Marvis voice sessions.",
+    "category": "AI",
+    "aliases": ["marvis", "voice", "jarvis"],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

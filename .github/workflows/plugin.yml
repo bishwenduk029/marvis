@@ -1,0 +1,50 @@
+name: Plugin
+
+on:
+  push:
+    paths:
+      - "apps/omarchy-plugin/**"
+  pull_request:
+    paths:
+      - "apps/omarchy-plugin/**"
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate manifest.json
+        run: |
+          python3 - <<'PY'
+          import json
+          m = json.load(open("apps/omarchy-plugin/manifest.json"))
+          assert m["schemaVersion"] == 1, "schemaVersion"
+          assert m["id"], "missing id"
+          for k in ("barWidget", "overlay"):
+              assert m["entryPoints"][k], f"missing entryPoints.{k}"
+          print("manifest ok:", m["id"])
+          PY
+
+      - name: Check entry points exist
+        run: |
+          cd apps/omarchy-plugin
+          test -f "$(python3 -c 'import json; print(json.load(open("manifest.json"))["entryPoints"]["overlay"])')"
+          test -f "$(python3 -c 'import json; print(json.load(open("manifest.json"))["entryPoints"]["barWidget"])')"
+
+      - name: Syntax-check JS
+        run: |
+          for f in apps/omarchy-plugin/components/*.js; do
+            node --check "$f"
+          done
+
+      - name: Pack plugin
+        run: |
+          mkdir -p dist
+          cp -r apps/omarchy-plugin dist/dev.marvis.app
+          tar czf marvis-plugin.tar.gz -C dist dev.marvis.app
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marvis-plugin
+          path: marvis-plugin.tar.gz
