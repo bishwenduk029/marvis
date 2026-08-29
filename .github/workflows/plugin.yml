@@ -38,7 +38,7 @@ jobs:
           # QML .js files start with `.pragma library` — strip that line,
           # which is a QML directive, not valid JS.
           for f in apps/omarchy-plugin/components/*.js; do
-            tmp=$(mktemp)
+            tmp=$(mktemp --suffix=.js)
             sed '/^\.pragma library$/d' "$f" > "$tmp"
             node --check "$tmp"
             rm "$tmp"
