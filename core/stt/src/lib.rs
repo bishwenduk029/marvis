@@ -176,22 +176,24 @@ fn make_vad() -> Option<VoiceActivityDetector> {
 fn recognizer() -> Result<&'static std::sync::Mutex<OfflineRecognizer>, String> {
     use std::sync::OnceLock;
     static RECOGNIZER: OnceLock<std::sync::Mutex<OfflineRecognizer>> = OnceLock::new();
-    RECOGNIZER.get_or_try_init(|| {
-        let mut config = OfflineRecognizerConfig::default();
-        config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
-            model: Some(model("sense-voice/model.onnx").to_string_lossy().into_owned()),
-            language: Some("auto".into()),
-            use_itn: true,
-        };
-        config.model_config.tokens =
-            Some(model("sense-voice/tokens.txt").to_string_lossy().into_owned());
-        config.model_config.provider = Some("cpu".into());
-        config.model_config.num_threads = 2;
-        config.model_config.debug = false;
-        OfflineRecognizer::create(&config)
-            .ok_or_else(|| "failed to load SenseVoice (run scripts/fetch-models.sh)".to_string())
-            .map(std::sync::Mutex::new)
-    })
+    if let Some(r) = RECOGNIZER.get() {
+        return Ok(r);
+    }
+    let mut config = OfflineRecognizerConfig::default();
+    config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
+        model: Some(model("sense-voice/model.onnx").to_string_lossy().into_owned()),
+        language: Some("auto".into()),
+        use_itn: true,
+    };
+    config.model_config.tokens =
+        Some(model("sense-voice/tokens.txt").to_string_lossy().into_owned());
+    config.model_config.provider = Some("cpu".into());
+    config.model_config.num_threads = 2;
+    config.model_config.debug = false;
+    let rec = OfflineRecognizer::create(&config)
+        .ok_or_else(|| "failed to load SenseVoice (run scripts/fetch-models.sh)".to_string())?;
+    let _ = RECOGNIZER.set(std::sync::Mutex::new(rec));
+    Ok(RECOGNIZER.get().unwrap())
 }
 
 fn mono_f32(data: &[f32], channels: usize) -> Vec<f32> {

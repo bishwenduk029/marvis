@@ -105,29 +105,31 @@ pub fn play(u: &Utterance, emit: Emit, stop: Arc<AtomicBool>) -> bool {
 
 fn engine() -> Result<&'static Mutex<OfflineTts>, String> {
     static TTS: OnceLock<Mutex<OfflineTts>> = OnceLock::new();
-    TTS.get_or_try_init(|| {
-        let config = OfflineTtsConfig {
-            model: sherpa_onnx::OfflineTtsModelConfig {
-                kokoro: OfflineTtsKokoroModelConfig {
-                    model: Some(model("kokoro/model.onnx").to_string_lossy().into_owned()),
-                    voices: Some(model("kokoro/voices.bin").to_string_lossy().into_owned()),
-                    tokens: Some(model("kokoro/tokens.txt").to_string_lossy().into_owned()),
-                    data_dir: Some(
-                        model("kokoro/espeak-ng-data").to_string_lossy().into_owned(),
-                    ),
-                    length_scale: 1.0,
-                    ..Default::default()
-                },
-                num_threads: 2,
-                debug: false,
+    if let Some(t) = TTS.get() {
+        return Ok(t);
+    }
+    let config = OfflineTtsConfig {
+        model: sherpa_onnx::OfflineTtsModelConfig {
+            kokoro: OfflineTtsKokoroModelConfig {
+                model: Some(model("kokoro/model.onnx").to_string_lossy().into_owned()),
+                voices: Some(model("kokoro/voices.bin").to_string_lossy().into_owned()),
+                tokens: Some(model("kokoro/tokens.txt").to_string_lossy().into_owned()),
+                data_dir: Some(
+                    model("kokoro/espeak-ng-data").to_string_lossy().into_owned(),
+                ),
+                length_scale: 1.0,
                 ..Default::default()
             },
+            num_threads: 2,
+            debug: false,
             ..Default::default()
-        };
-        OfflineTts::create(&config)
-            .ok_or_else(|| "failed to load Kokoro (run scripts/fetch-models.sh)".to_string())
-            .map(Mutex::new)
-    })
+        },
+        ..Default::default()
+    };
+    let tts = OfflineTts::create(&config)
+        .ok_or_else(|| "failed to load Kokoro (run scripts/fetch-models.sh)".to_string())?;
+    let _ = TTS.set(Mutex::new(tts));
+    Ok(TTS.get().unwrap())
 }
 
 fn write_f32(data: &mut [f32], samples: &[f32], cursor: &Mutex<usize>, emit: &Emit, channels: usize) {
