@@ -4,6 +4,8 @@ version.workspace = true
 edition = "2021"
 
 [dependencies]
-pi_agent_rust = { version = "0.3", default-features = false }
-# Runtime used to block on the SDK's async API; same version the SDK pins.
-asupersync = { version = "0.4.4", default-features = false }
+# pi_agent_rust 0.3 gates `session_sqlite` behind `sqlite-sessions` but its
+# memory/session_index modules import it unconditionally, so that feature is
+# required even without the TUI. Match the SDK example's asupersync setup.
+pi_agent_rust = { version = "0.3", default-features = false, features = ["sqlite-sessions"] }
+asupersync = { version = "0.4.4", features = ["test-internals"], default-features = false }
