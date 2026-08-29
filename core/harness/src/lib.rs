@@ -14,8 +14,9 @@ use std::sync::{Arc, Mutex};
 use pi::model::AssistantMessageEvent;
 use pi::sdk::{AgentEvent, AgentSessionHandle, ContentBlock, SessionOptions, create_agent_session};
 
-/// Public contract — do not change signature.
-pub fn run(user_text: &str, on_activity: impl FnMut(&str)) -> Result<String, String> {
+/// Public contract — `on_activity` must be `Send` so it can be parked behind a
+/// mutex and shared into the SDK's async callback.
+pub fn run(user_text: &str, on_activity: impl FnMut(&str) + Send) -> Result<String, String> {
     let provider = std::env::var("MARVIS_LLM_PROVIDER").unwrap_or_else(|_| "openrouter".into());
     let model = std::env::var("MARVIS_LLM_MODEL").unwrap_or_else(|_| "z-ai/glm-5.3-flash".into());
 
