@@ -1,15 +1,15 @@
-//! Speech-to-text: microphone capture with Silero VAD, then SenseVoice
+//! Speech-to-text: PipeWire capture (`parec`) + Silero VAD + Moonshine
 //! transcription. Models load on first use and are cached for the process.
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::SampleFormat;
-use marvis_common::{model, Emit, energy, resample};
+use marvis_common::{model, Emit, energy};
 use sherpa_onnx::{
-    OfflineRecognizer, OfflineRecognizerConfig, OfflineSenseVoiceModelConfig, SileroVadModelConfig,
+    OfflineMoonshineModelConfig, OfflineRecognizer, OfflineRecognizerConfig, SileroVadModelConfig,
     VadModelConfig, VoiceActivityDetector,
 };
+use std::io::Read;
+use std::sync::Arc;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 const TARGET_RATE: u32 = 16000;
@@ -21,96 +21,46 @@ pub struct Speech {
     pub sample_rate: u32,
 }
 
-/// Record until the user stops talking (VAD + trailing silence), `stop` flips,
-/// or the hard time cap hits. Returns the speech-only samples.
+/// Record until the user stops talking (VAD + trailing silence), `stop`
+/// flips, or the hard time cap hits. Returns the speech-only samples.
+///
+/// Capture is a `parec` subprocess (s16le mono 16 kHz on stdout): PipeWire's
+/// own path, which measures clean on this machine, unlike cpal's ALSA route.
+/// Killing the child gives instant interrupt latency.
 pub fn record_speech(emit: Emit, stop: Arc<AtomicBool>) -> Option<Speech> {
-    let host = cpal::default_host();
-    let device = host.default_input_device()?;
-    let supported = device.default_input_config().ok()?;
-    let config = supported.config();
-    let in_rate = config.sample_rate.0;
-    let channels = config.channels as usize;
-    let sample_format = supported.sample_format();
+    let mut child = Command::new("parec")
+        .args(["--format=s16le", "--channels=1", "--rate=16000"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .or_else(|_| {
+            eprintln!("marvis-stt: parec not found, trying pw-record");
+            Command::new("pw-record")
+                .args(["--format", "s16", "--channels", "1", "--rate", "16000", "-"])
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+        })
+        .ok()?;
+    let mut out = child.stdout.take()?;
 
     let vad = make_vad()?;
-
-    let (tx, rx) = mpsc::channel::<Vec<f32>>();
-    let err_fn = |e| eprintln!("mic error: {e}");
-
-    let stream = match sample_format {
-        SampleFormat::F32 => device.build_input_stream(
-            &config,
-            {
-                let tx = tx.clone();
-                move |data: &[f32], _| {
-                    let _ = tx.send(mono_f32(data, channels));
-                }
-            },
-            err_fn,
-            None,
-        ),
-        SampleFormat::I16 => device.build_input_stream(
-            &config,
-            {
-                let tx = tx.clone();
-                move |data: &[i16], _| {
-                    let _ = tx.send(data.chunks(channels).map(|f| f[0] as f32 / 32768.0).collect());
-                }
-            },
-            err_fn,
-            None,
-        ),
-        SampleFormat::I32 => device.build_input_stream(
-            &config,
-            {
-                let tx = tx.clone();
-                move |data: &[i32], _| {
-                    let _ = tx
-                        .send(data.chunks(channels).map(|f| f[0] as f32 / 2147483648.0).collect());
-                }
-            },
-            err_fn,
-            None,
-        ),
-        SampleFormat::U16 => device.build_input_stream(
-            &config,
-            {
-                let tx = tx.clone();
-                move |data: &[u16], _| {
-                    let _ = tx
-                        .send(data.chunks(channels).map(|f| (f[0] as f32 - 32768.0) / 32768.0).collect());
-                }
-            },
-            err_fn,
-            None,
-        ),
-        _ => {
-            eprintln!("marvis-stt: unsupported mic sample format: {sample_format:?}");
-            return None;
-        }
-    }
-    .ok()?;
-    if stream.play().is_err() {
-        return None;
-    }
-
     let mut speech = Vec::new();
     let mut got_speech = false;
     let mut last_speech = Instant::now();
     let start = Instant::now();
+    let mut buf = vec![0u8; 1024]; // 512 s16 samples ≈ 32 ms
 
-    while !stop.load(Ordering::Relaxed) {
-        let chunk = match rx.recv_timeout(Duration::from_millis(100)) {
-            Ok(c) => c,
-            Err(_) => {
-                if got_speech && last_speech.elapsed() > Duration::from_millis(1200) {
-                    break;
-                }
-                continue;
-            }
-        };
+    'outer: while !stop.load(Ordering::Relaxed) {
+        if out.read_exact(&mut buf).is_err() {
+            break;
+        }
+        let chunk: Vec<f32> = buf
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+            .collect();
         emit(energy(&chunk));
-        for w in resample(&chunk, in_rate, TARGET_RATE).chunks(WINDOW) {
+        for w in chunk.chunks(WINDOW) {
             vad.accept_waveform(w);
             while let Some(seg) = vad.front() {
                 speech.extend_from_slice(seg.samples());
@@ -126,13 +76,14 @@ pub fn record_speech(emit: Emit, stop: Arc<AtomicBool>) -> Option<Speech> {
             break;
         }
     }
+    let _ = child.kill();
+    let _ = child.wait();
     vad.flush();
     while let Some(seg) = vad.front() {
         speech.extend_from_slice(seg.samples());
         vad.pop();
     }
 
-    drop(stream);
     if got_speech && speech.len() as f32 / TARGET_RATE as f32 > 0.2 {
         Some(Speech { samples: speech, sample_rate: TARGET_RATE })
     } else {
@@ -140,7 +91,7 @@ pub fn record_speech(emit: Emit, stop: Arc<AtomicBool>) -> Option<Speech> {
     }
 }
 
-/// Transcribe speech samples with SenseVoice (cached recognizer).
+/// Transcribe speech samples with Moonshine (cached recognizer).
 pub fn transcribe(samples: &[f32], sample_rate: u32) -> Result<String, String> {
     let rec = recognizer()?;
     let guard = rec.lock().map_err(|_| "recognizer lock poisoned".to_string())?;
@@ -151,6 +102,11 @@ pub fn transcribe(samples: &[f32], sample_rate: u32) -> Result<String, String> {
         Some(r) if !r.text.trim().is_empty() => Ok(r.text.trim().to_string()),
         _ => Err("no speech recognized".into()),
     }
+}
+
+/// Load the VAD + recognizer so the first turn is already warm.
+pub fn warmup() {
+    let _ = recognizer();
 }
 
 // --- internals -------------------------------------------------------------
@@ -179,23 +135,25 @@ fn recognizer() -> Result<&'static std::sync::Mutex<OfflineRecognizer>, String> 
     if let Some(r) = RECOGNIZER.get() {
         return Ok(r);
     }
+    // Moonshine tiny int8: ~120 MB total, built for fast CPU transcription.
     let mut config = OfflineRecognizerConfig::default();
-    config.model_config.sense_voice = OfflineSenseVoiceModelConfig {
-        model: Some(model("sense-voice/model.onnx").to_string_lossy().into_owned()),
-        language: Some("auto".into()),
-        use_itn: true,
+    config.model_config.moonshine = OfflineMoonshineModelConfig {
+        preprocessor: Some(model("moonshine/preprocess.onnx").to_string_lossy().into_owned()),
+        encoder: Some(model("moonshine/encode.int8.onnx").to_string_lossy().into_owned()),
+        cached_decoder: Some(
+            model("moonshine/cached_decode.int8.onnx").to_string_lossy().into_owned(),
+        ),
+        uncached_decoder: Some(
+            model("moonshine/uncached_decode.int8.onnx").to_string_lossy().into_owned(),
+        ),
+        merged_decoder: None,
     };
-    config.model_config.tokens =
-        Some(model("sense-voice/tokens.txt").to_string_lossy().into_owned());
+    config.model_config.tokens = Some(model("moonshine/tokens.txt").to_string_lossy().into_owned());
     config.model_config.provider = Some("cpu".into());
     config.model_config.num_threads = 2;
     config.model_config.debug = false;
     let rec = OfflineRecognizer::create(&config)
-        .ok_or_else(|| "failed to load SenseVoice (run scripts/fetch-models.sh)".to_string())?;
+        .ok_or_else(|| "failed to load Moonshine (run scripts/fetch-models.sh)".to_string())?;
     let _ = RECOGNIZER.set(std::sync::Mutex::new(rec));
     Ok(RECOGNIZER.get().unwrap())
-}
-
-fn mono_f32(data: &[f32], channels: usize) -> Vec<f32> {
-    data.chunks(channels).map(|f| f.iter().sum::<f32>() / channels as f32).collect()
 }

@@ -20,23 +20,35 @@ Scope {
   property string activity: ""
   readonly property bool connected: socket.connected
 
-  // The daemon listens on $XDG_RUNTIME_DIR/marvis.sock (i.e. /run/user/<uid>)
-  // with a /tmp fallback for odd setups.
-  readonly property string primaryPath:
+  // The daemon listens on $XDG_RUNTIME_DIR/marvis.sock (i.e. /run/user/<uid>).
+  // No /tmp fallback: a wrong path would stick forever, while retrying the
+  // right one recovers as soon as the daemon is up.
+  readonly property string socketPath:
     (Quickshell.env("XDG_RUNTIME_DIR") || "/run/user/1000") + "/marvis.sock"
-  readonly property string fallbackPath: "/tmp/marvis.sock"
-  property string socketPath: primaryPath
 
   function send(json) {
+    console.log("[marvis] send:", json, "connected:", socket.connected)
     if (socket.connected) socket.write(json + "\n")
   }
   function start() { send('{"cmd":"start"}') }
   function interrupt() { send('{"cmd":"interrupt"}') }
   function ping() { send('{"cmd":"ping"}') }
-  // The one gesture: idle starts a session, anything active interrupts it.
+  function say(text) { send(JSON.stringify({ cmd: "say", value: text })) }
+  // Spoken once, on the first successful link to the daemon.
+  property bool greeted: false
+  function greet() {
+    if (root.greeted) return
+    root.greeted = true
+    say("Marvis online.")
+  }
+  // The one gesture: idle starts; while she is talking, cut her off and take
+  // the floor (barge-in); mid-thought/listening, interrupt.
   function toggle() {
     if (state === "idle") start()
-    else interrupt()
+    else if (state === "speaking") {
+      interrupt()
+      start()
+    } else interrupt()
   }
 
   // After an error or disconnect, quickshell's Socket ignores a plain
@@ -48,6 +60,7 @@ Scope {
   }
 
   function handleLine(line) {
+    console.log("[marvis] recv:", String(line).substring(0, 80))
     var message
     try { message = JSON.parse(String(line)) } catch (e) { return }
     if (!message || typeof message !== "object") return
@@ -81,27 +94,26 @@ Scope {
     onConnectedChanged: {
       if (connected) {
         root.ping()
+        root.greet()
         retryTimer.stop()
       } else {
         retryTimer.restart()
       }
     }
     onError: {
-      // Primary socket missing -> try /tmp once, then keep retrying either way.
-      if (root.socketPath !== root.fallbackPath)
-        root.socketPath = root.fallbackPath
+      // Daemon not up yet (or busy warming models) — keep retrying.
       retryTimer.restart()
     }
   }
 
-  // The daemon may start long after the shell does. connected flips false on
-  // any disconnect/error, so this is the single reconnect path.
+  // The reconnect function (defined above) forces the link down and retries;
+  // this timer always ticks so any failure mode still recovers.
   Timer {
     id: retryTimer
     interval: 3000
     repeat: true
-    running: !socket.connected
-    onTriggered: root.reconnect()
+    running: true
+    onTriggered: if (!socket.connected) root.reconnect()
   }
 
   Component.onCompleted: socket.connected = true

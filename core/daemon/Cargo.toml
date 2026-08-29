@@ -5,4 +5,7 @@ edition.workspace = true
 
 [dependencies]
 marvis-engine = { path = "../engine" }
+marvis-stt = { path = "../stt" }
+marvis-tts = { path = "../tts" }
+marvis-common = { path = "../common" }
 serde_json = { workspace = true }

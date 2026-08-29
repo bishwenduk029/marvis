@@ -1,70 +1,37 @@
-//! Marvis harness — the brain, kept deliberately lean: a streaming
-//! OpenAI-compatible chat call (OpenRouter by default, any local server via
-//! env). No agent loop, no tools — those come later if/when needed.
+//! Marvis harness — the brain, via the `genai` multi-provider client.
 //!
-//! Contract: `run(user_text, on_activity) -> Result<String, String>` where
-//! `on_activity` receives text deltas as they stream in.
+//! Non-streaming on purpose: the engine speaks the full reply through Kokoro,
+//! so deltas buy nothing yet. When sentence-chunked TTS lands, this switches
+//! to `exec_chat_stream` and `on_activity` starts carrying text deltas.
+//!
+//! Contract: `run(user_text, on_activity) -> Result<String, String>`.
+//! Default model is a fast non-reasoning chat model via OpenRouter; override
+//! with `MARVIS_LLM_MODEL` (genai syntax: `open_router::<provider/model>`).
 
-use std::io::{BufRead, BufReader};
+use genai::chat::{ChatMessage, ChatRequest};
 
-pub fn run(user_text: &str, mut on_activity: impl FnMut(&str)) -> Result<String, String> {
-    let base = std::env::var("MARVIS_LLM_BASE")
-        .unwrap_or_else(|_| "https://openrouter.ai/api/v1".into());
-    let key = std::env::var("MARVIS_LLM_KEY")
-        .or_else(|_| std::env::var("OPENROUTER_API_KEY"))
-        .map_err(|_| "no API key (set MARVIS_LLM_KEY or OPENROUTER_API_KEY)".to_string())?;
+const SYSTEM: &str = "You are Marvis, a concise voice assistant. Answer in plain spoken \
+                      English, one or two sentences unless asked for more.";
+
+pub fn run(user_text: &str, _on_activity: impl FnMut(&str)) -> Result<String, String> {
     let model = std::env::var("MARVIS_LLM_MODEL")
-        .unwrap_or_else(|_| "z-ai/glm-5.3-flash".into());
+        .unwrap_or_else(|_| "open_router::google/gemini-2.0-flash-001".into());
 
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are Marvis, a concise voice assistant. Answer in plain spoken \
-                            English, one or two sentences unless asked for more."
-            },
-            { "role": "user", "content": user_text }
-        ],
-        "stream": true
-    });
+    let client = genai::Client::builder().build();
+    let chat_req = ChatRequest::new(vec![
+        ChatMessage::system(SYSTEM),
+        ChatMessage::user(user_text),
+    ]);
 
-    let url = format!("{}/chat/completions", base.trim_end_matches('/'));
-    let response = ureq::post(&url)
-        .set("Authorization", &format!("Bearer {key}"))
-        .set("Content-Type", "application/json")
-        .send_json(body)
-        .map_err(|e| format!("request failed: {e}"))?;
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("async runtime: {e}"))?;
 
-    if response.status() != 200 {
-        return Err(format!("llm returned HTTP {}", response.status()));
-    }
-
-    let mut full = String::new();
-    let mut line = String::new();
-    let mut reader = BufReader::new(response.into_reader());
-    loop {
-        line.clear();
-        if reader.read_line(&mut line).map_err(|e| e.to_string())? == 0 {
-            break;
-        }
-        let data = match line.trim().strip_prefix("data:") {
-            Some(d) => d.trim(),
-            None => continue,
-        };
-        if data == "[DONE]" {
-            break;
-        }
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(data) {
-            if let Some(delta) = value["choices"][0]["delta"]["content"].as_str() {
-                full.push_str(delta);
-                on_activity(delta);
-            }
-        }
-    }
-
-    if full.trim().is_empty() {
-        return Err("empty reply".into());
-    }
-    Ok(full.trim().to_string())
+    let res = rt.block_on(client.exec_chat(&model, chat_req, None))
+        .map_err(|e| e.to_string())?;
+    res.first_text()
+        .map(|t| t.trim().to_string())
+        .filter(|t| !t.is_empty())
+        .ok_or_else(|| "empty reply".to_string())
 }

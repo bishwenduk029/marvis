@@ -4,5 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-ureq = { version = "2.12", features = ["json"] }
-serde_json = { workspace = true }
+genai = "0.6"
+tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros"] }

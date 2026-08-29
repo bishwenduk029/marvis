@@ -1,10 +1,10 @@
-//! Text-to-speech: Kokoro synthesis + speaker playback with energy metering.
-//! The engine loads on first use and is cached for the process.
+//! Text-to-speech: vits/piper synthesis + `paplay` playback with energy
+//! metering. The engine loads on first use and is cached for the process.
 
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::SampleFormat;
 use marvis_common::{model, Emit, energy};
-use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsKokoroModelConfig};
+use sherpa_onnx::{GenerationConfig, OfflineTts, OfflineTtsConfig, OfflineTtsVitsModelConfig};
+use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -15,7 +15,7 @@ pub struct Utterance {
     pub sample_rate: u32,
 }
 
-/// Synthesize text with Kokoro.
+/// Synthesize text with vits/piper.
 pub fn synthesize(text: &str) -> Result<Utterance, String> {
     let engine = engine()?;
     let guard = engine.lock().map_err(|_| "tts lock poisoned".to_string())?;
@@ -26,79 +26,74 @@ pub fn synthesize(text: &str) -> Result<Utterance, String> {
     Ok(Utterance { samples: audio.samples().to_vec(), sample_rate: audio.sample_rate() as u32 })
 }
 
-/// Play samples on the default output device, emitting RMS energy. Returns
-/// `false` if playback was interrupted or failed.
+/// Play samples through `paplay --raw`, emitting RMS energy paced with real
+/// playback. Returns `false` if playback was interrupted or failed.
 pub fn play(u: &Utterance, emit: Emit, stop: Arc<AtomicBool>) -> bool {
     if u.samples.is_empty() {
         return true;
     }
-    let host = cpal::default_host();
-    let device = match host.default_output_device() {
-        Some(d) => d,
+    let mut child = match Command::new("paplay")
+        .args([
+            "--raw",
+            "--format=s16le",
+            "--channels=1",
+            &format!("--rate={}", u.sample_rate),
+        ])
+        .stdin(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .or_else(|_| {
+            Command::new("pw-play")
+                .args([
+                    "--format",
+                    "s16",
+                    "--channels",
+                    "1",
+                    "--rate",
+                    &u.sample_rate.to_string(),
+                    "-",
+                ])
+                .stdin(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+        }) {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    let mut stdin = match child.stdin.take() {
+        Some(s) => s,
         None => return false,
     };
-    let supported = match device.default_output_config() {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    let config = supported.config();
-    let channels = config.channels as usize;
-    let sample_format = supported.sample_format();
 
-    let samples = Arc::new(u.samples.clone());
-    let cursor = Arc::new(Mutex::new(0usize));
-    let err_fn = |e| eprintln!("speaker error: {e}");
-
-    let stream = match sample_format {
-        SampleFormat::F32 => device.build_output_stream(
-            &config,
-            {
-                let (s, c, e) = (samples.clone(), cursor.clone(), emit.clone());
-                move |data: &mut [f32], _| write_f32(data, &s, &c, &e, channels)
-            },
-            err_fn,
-            None,
-        ),
-        SampleFormat::I16 => device.build_output_stream(
-            &config,
-            {
-                let (s, c, e) = (samples.clone(), cursor.clone(), emit.clone());
-                move |data: &mut [i16], _| write_i16(data, &s, &c, &e, channels)
-            },
-            err_fn,
-            None,
-        ),
-        SampleFormat::U16 => device.build_output_stream(
-            &config,
-            {
-                let (s, c, e) = (samples.clone(), cursor.clone(), emit.clone());
-                move |data: &mut [u16], _| write_u16(data, &s, &c, &e, channels)
-            },
-            err_fn,
-            None,
-        ),
-        _ => return false,
-    };
-    let stream = match stream {
-        Ok(s) => s,
-        Err(_) => return false,
-    };
-    if stream.play().is_err() {
-        return false;
-    }
-
-    let total_frames = samples.len();
-    let frame = Duration::from_secs_f32(1.0 / u.sample_rate as f32);
-    loop {
+    // Pace writes at real-time so energy events track what is heard.
+    let chunk_dur = Duration::from_secs_f32(1600.0 / u.sample_rate as f32); // 100 ms
+    for chunk in u.samples.chunks(1600) {
         if stop.load(Ordering::Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
             return false;
         }
-        if *cursor.lock().unwrap() >= total_frames {
-            std::thread::sleep(frame * 64); // let the tail play out
-            return true;
+        let mut bytes = Vec::with_capacity(chunk.len() * 2);
+        let mut sum = 0.0;
+        for &s in chunk {
+            let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
+            bytes.extend_from_slice(&v.to_le_bytes());
+            sum += s * s;
         }
-        std::thread::sleep(frame * 32);
+        if stdin.write_all(&bytes).is_err() {
+            return false;
+        }
+        emit(energy(chunk).min(1.0));
+        std::thread::sleep(chunk_dur);
     }
+    drop(stdin); // EOF: paplay drains and exits
+    let _ = child.wait();
+    true
+}
+
+/// Load the TTS engine so the first turn is already warm.
+pub fn warmup() {
+    let _ = engine();
 }
 
 // --- internals -------------------------------------------------------------
@@ -108,15 +103,15 @@ fn engine() -> Result<&'static Mutex<OfflineTts>, String> {
     if let Some(t) = TTS.get() {
         return Ok(t);
     }
+    // Vits/Piper: ~60 MB and ~12x faster than Kokoro on a weak CPU.
     let config = OfflineTtsConfig {
         model: sherpa_onnx::OfflineTtsModelConfig {
-            kokoro: OfflineTtsKokoroModelConfig {
-                model: Some(model("kokoro/model.onnx").to_string_lossy().into_owned()),
-                voices: Some(model("kokoro/voices.bin").to_string_lossy().into_owned()),
-                tokens: Some(model("kokoro/tokens.txt").to_string_lossy().into_owned()),
-                data_dir: Some(
-                    model("kokoro/espeak-ng-data").to_string_lossy().into_owned(),
-                ),
+            vits: OfflineTtsVitsModelConfig {
+                model: Some(model("vits-amy/en_US-amy-medium.onnx").to_string_lossy().into_owned()),
+                tokens: Some(model("vits-amy/tokens.txt").to_string_lossy().into_owned()),
+                data_dir: Some(model("vits-amy/espeak-ng-data").to_string_lossy().into_owned()),
+                noise_scale: 0.667,
+                noise_scale_w: 0.8,
                 length_scale: 1.0,
                 ..Default::default()
             },
@@ -127,54 +122,7 @@ fn engine() -> Result<&'static Mutex<OfflineTts>, String> {
         ..Default::default()
     };
     let tts = OfflineTts::create(&config)
-        .ok_or_else(|| "failed to load Kokoro (run scripts/fetch-models.sh)".to_string())?;
+        .ok_or_else(|| "failed to load vits model (run scripts/fetch-models.sh)".to_string())?;
     let _ = TTS.set(Mutex::new(tts));
     Ok(TTS.get().unwrap())
-}
-
-fn write_f32(data: &mut [f32], samples: &[f32], cursor: &Mutex<usize>, emit: &Emit, channels: usize) {
-    let mut c = cursor.lock().unwrap();
-    for frame in data.chunks_mut(channels) {
-        let s = if *c < samples.len() { samples[*c] } else { 0.0 };
-        for ch in frame.iter_mut() {
-            *ch = s;
-        }
-        *c += 1;
-    }
-    let start = c.saturating_sub(data.len() / channels);
-    if start < samples.len() {
-        emit(energy(&samples[start..c.min(samples.len())]));
-    }
-}
-
-fn write_i16(data: &mut [i16], samples: &[f32], cursor: &Mutex<usize>, emit: &Emit, channels: usize) {
-    let mut c = cursor.lock().unwrap();
-    for frame in data.chunks_mut(channels) {
-        let s = if *c < samples.len() { samples[*c] } else { 0.0 };
-        let v = (s.clamp(-1.0, 1.0) * 32767.0) as i16;
-        for ch in frame.iter_mut() {
-            *ch = v;
-        }
-        *c += 1;
-    }
-    let start = c.saturating_sub(data.len() / channels);
-    if start < samples.len() {
-        emit(energy(&samples[start..c.min(samples.len())]));
-    }
-}
-
-fn write_u16(data: &mut [u16], samples: &[f32], cursor: &Mutex<usize>, emit: &Emit, channels: usize) {
-    let mut c = cursor.lock().unwrap();
-    for frame in data.chunks_mut(channels) {
-        let s = if *c < samples.len() { samples[*c] } else { 0.0 };
-        let v = ((s.clamp(-1.0, 1.0) * 32767.0) + 32768.0) as u16;
-        for ch in frame.iter_mut() {
-            *ch = v;
-        }
-        *c += 1;
-    }
-    let start = c.saturating_sub(data.len() / channels);
-    if start < samples.len() {
-        emit(energy(&samples[start..c.min(samples.len())]));
-    }
 }
