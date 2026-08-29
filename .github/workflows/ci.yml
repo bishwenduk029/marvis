@@ -13,15 +13,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
-
+      - name: Install system deps (ALSA for cpal)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: "."
-
       - name: Check
         run: cargo check --workspace
-
       - name: Test
         run: cargo test --workspace
+
+  build-daemon:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system deps (ALSA for cpal)
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "."
+      - name: Build daemon (release)
+        run: cargo build --release -p marvis-daemon
+      - uses: actions/upload-artifact@v4
+        with:
+          name: marvis-daemon-linux-x86_64
+          path: target/release/marvis-daemon
