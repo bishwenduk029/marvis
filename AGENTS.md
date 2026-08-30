@@ -50,7 +50,9 @@ scripts/fetch-models.sh          # before first run
 ## Env vars
 
 - `MARVIS_MODELS` — model dir for sherpa-onnx
-- `MARVIS_LLM_MODEL` — jcode model id for the session (unset = jcode default)
+- `MARVIS_LLM_MODEL` — jcode model id for the session (unset = jcode default),
+  e.g. `liquid/lfm-2.5-2.6b:free` (genai's `open_router::` prefix is gone;
+  run `jcode model list` for valid ids)
 - `MARVIS_JCODE_APPROVE` — `0`/`false`/`off` to deny jcode tool-permission
   prompts instead of auto-allowing (default: allow)
 - `MARVIS_JCODE_WORKDIR` — working dir for Marvis's jcode sessions (default
