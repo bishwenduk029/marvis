@@ -64,6 +64,14 @@ RAM. Every entry here was paid for in real debugging time.
   mic clipped at full scale, VAD saw a wall of fake speech.
   `amixer -c 1 sset 'Internal Mic Boost' 0dB` (needs re-checking after
   PipeWire restores state; `alsactl store` needs sudo).
+- 2026-08-30 variant: after suspend/wake, capture returned **uniform noise
+  (peak 32768, 41% clipped) even with boost already 0**. Lowering `Capture`
+  to 51% helped little; a full `systemctl --user restart pipewire wireplumber
+  pipewire-pulse` cleared the codec state instantly (0 clipped). wireplumber
+  then persisted the good gains, so they survive later restarts.
+  Diagnose with: `pw-record --target <mic> ...` + RMS/peak stats — uniform
+  histogram + huge zero-crossing rate = garbage bytes, not loud audio.
+  Also: engine now SPEAKS error replies (silent death looked like a hang).
 
 ## Daemon design lessons
 

@@ -69,15 +69,34 @@ pub fn run_turn(on_event: impl Fn(&Event) + Send + Sync + 'static, stop: Arc<Ato
     };
     let emit = |e: Event| on_event(&e);
 
+    // Errors are spoken, not just shown: a voice assistant that fails
+    // silently reads as "dead". `shown` goes to the UI verbatim (with the
+    // (stt)/(brain) tag the daemon logs); `spoken` is the short phrase
+    // passed to TTS.
+    let speak_error = {
+        let on_event = on_event.clone();
+        let emit_energy = emit_energy.clone();
+        let stop = stop.clone();
+        move |shown: String, spoken: &str| {
+            on_event(&Event::Reply(shown));
+            if let Ok(u) = marvis_tts::synthesize(spoken) {
+                on_event(&Event::State(Phase::Speaking));
+                marvis_tts::play(&u, emit_energy, stop);
+            }
+            on_event(&Event::State(Phase::Idle));
+        }
+    };
+
     // 1. Listen.
     emit(Event::State(Phase::Listening));
     let speech = match marvis_stt::record_speech(emit_energy.clone(), stop.clone()) {
         Some(s) => s,
         None => {
             if !stop.load(Ordering::Relaxed) {
-                emit(Event::Reply("I didn't catch that.".into()));
+                speak_error("I didn't catch that.".into(), "I didn't catch that.");
+            } else {
+                emit(Event::State(Phase::Idle));
             }
-            emit(Event::State(Phase::Idle));
             return;
         }
     };
@@ -91,8 +110,7 @@ pub fn run_turn(on_event: impl Fn(&Event) + Send + Sync + 'static, stop: Arc<Ato
     let text = match marvis_stt::transcribe(&speech.samples, speech.sample_rate) {
         Ok(t) => t,
         Err(e) => {
-            emit(Event::Reply(format!("(stt) {e}")));
-            emit(Event::State(Phase::Idle));
+            speak_error(format!("(stt) {e}"), "I couldn't make out what you said.");
             return;
         }
     };
@@ -132,8 +150,7 @@ pub fn run_turn(on_event: impl Fn(&Event) + Send + Sync + 'static, stop: Arc<Ato
         match result {
             Ok(r) => r,
             Err(e) => {
-                emit(Event::Reply(format!("(brain) {e}")));
-                emit(Event::State(Phase::Idle));
+                speak_error(format!("(brain) {e}"), "Sorry, something went wrong while thinking.");
                 return;
             }
         }
