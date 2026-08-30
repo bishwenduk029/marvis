@@ -117,15 +117,6 @@ fn handle_client(
 }
 
 fn main() {
-    // genai's OpenRouter adapter reads OPEN_ROUTER_API_KEY; accept the more
-    // common OPENROUTER_API_KEY spelling too.
-    if let (Ok(k), Err(_)) = (
-        std::env::var("OPENROUTER_API_KEY"),
-        std::env::var("OPEN_ROUTER_API_KEY"),
-    ) {
-        std::env::set_var("OPEN_ROUTER_API_KEY", k);
-    }
-
     let path = socket_path();
     if path.exists() {
         let _ = std::fs::remove_file(&path);

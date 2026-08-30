@@ -4,5 +4,5 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
-genai = "0.6"
-tokio = { version = "1", features = ["rt", "net", "time", "io-util", "macros"] }
+# Pinned to a tested rev; jcode's crate API is not yet published to crates.io.
+jcode-sdk = { git = "https://github.com/1jehuang/jcode", rev = "a18af25a556d27b8c1535716df218c05d17831c9" }

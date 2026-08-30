@@ -100,11 +100,36 @@ pub fn run_turn(on_event: impl Fn(&Event) + Send + Sync + 'static, stop: Arc<Ato
 
     let reply = {
         let on_event = on_event.clone();
-        match marvis_harness::run(&text, move |line| {
+        // Barge-in while thinking: stop can fire mid-turn (a new `start` or
+        // `interrupt` command), so a watcher cancels the in-flight jcode turn
+        // instead of waiting for a reply nobody will hear.
+        let done = Arc::new(AtomicBool::new(false));
+        let watcher = {
+            let done = done.clone();
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                if !done.load(Ordering::Relaxed) {
+                    marvis_harness::interrupt();
+                }
+            })
+        };
+        let result = marvis_harness::run(&text, move |line| {
             if !line.is_empty() {
                 on_event(&Event::Activity(line.to_string()));
             }
-        }) {
+        });
+        done.store(true, Ordering::Relaxed);
+        let _ = watcher.join();
+        // A barge-in during thinking means the user already moved on; don't
+        // speak the stale reply.
+        if stop.load(Ordering::Relaxed) {
+            emit(Event::State(Phase::Idle));
+            return;
+        }
+        match result {
             Ok(r) => r,
             Err(e) => {
                 emit(Event::Reply(format!("(brain) {e}")));
