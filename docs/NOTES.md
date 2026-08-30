@@ -143,8 +143,13 @@ RAM. Every entry here was paid for in real debugging time.
 
 ## Parked (deliberate, revisit)
 
-- **Conversation mode**: after her reply, auto-relisten ~5s so the user never
-  clicks mid-conversation. Blocked by self-hearing: speakers → mic → she
-  transcribes her own voice (no AEC on this laptop). Viable with headphones
-  first, or with PipeWire echo-cancel module (load-module echo-cancel).
+- **Conversation mode: SHIPPED 2026-08-30** — half-duplex auto-relisten
+  (mic opens 300ms after her reply finishes; 30s silent window ends the
+  conversation; click while listening ends it). `MARVIS_CONVERSATION=0`
+  restores one-turn-per-click.
+- **Hardware-adaptive models**: model choice is currently tuned for this
+  2017 laptop (moonshine + vits-amy). On modern hardware (Apple Silicon,
+  Panther Lake, Strix Point) pick better models automatically: sense-voice
+  or whisper-turbo STT, kokoro TTS — both families are already in the
+  models dir, the code just needs a tier switch + env override. Later.
 - Persistent idle glow shipped (VoiceNode presence 0.22 in dormant).
