@@ -26,6 +26,12 @@ Scope {
   readonly property string socketPath:
     (Quickshell.env("XDG_RUNTIME_DIR") || "/run/user/1000") + "/marvis.sock"
 
+  // Liveness: a daemon restart can leave this Socket holding a zombie
+  // connection it still believes is up (writes vanish, no error fires), and
+  // then the retry timer never runs because `connected` reads true. So ping
+  // every tick and treat a stale pong as a dead link worth reconnecting.
+  property real lastPong: 0
+
   function send(json) {
     console.log("[marvis] send:", json, "connected:", socket.connected)
     if (socket.connected) socket.write(json + "\n")
@@ -42,8 +48,19 @@ Scope {
     say("Marvis online.")
   }
   // The one gesture: idle starts; while she is talking, cut her off and take
-  // the floor (barge-in); mid-thought/listening, interrupt.
+  // the floor (barge-in); mid-thought/listening, interrupt. A click while the
+  // link is down first recovers the connection, then runs the gesture as soon
+  // as the socket is back — a click must never be a silent no-op.
+  property bool pendingGesture: false
   function toggle() {
+    if (!connected) {
+      pendingGesture = true
+      reconnect()
+      return
+    }
+    gesture()
+  }
+  function gesture() {
     if (state === "idle") start()
     else if (state === "speaking") {
       interrupt()
@@ -76,6 +93,9 @@ Scope {
       case "transcript":
         root.transcript = String(message.value || "")
         break
+      case "pong":
+        root.lastPong = Date.now()
+        break
       case "reply":
         root.reply = String(message.value || "")
         break
@@ -93,9 +113,14 @@ Scope {
     }
     onConnectedChanged: {
       if (connected) {
+        root.lastPong = Date.now()
         root.ping()
         root.greet()
         retryTimer.stop()
+        if (root.pendingGesture) {
+          root.pendingGesture = false
+          root.gesture()
+        }
       } else {
         retryTimer.restart()
       }
@@ -107,13 +132,25 @@ Scope {
   }
 
   // The reconnect function (defined above) forces the link down and retries;
-  // this timer always ticks so any failure mode still recovers.
+  // this timer always ticks so any failure mode still recovers. While the
+  // link looks up it doubles as a liveness check: ping, and if no pong came
+  // back within ~9s the link is a zombie — force a reconnect.
   Timer {
     id: retryTimer
     interval: 3000
     repeat: true
     running: true
-    onTriggered: if (!socket.connected) root.reconnect()
+    onTriggered: {
+      if (!socket.connected) {
+        root.reconnect()
+        return
+      }
+      root.ping()
+      if (root.lastPong > 0 && Date.now() - root.lastPong > 9000) {
+        console.log("[marvis] link is stale, reconnecting")
+        root.reconnect()
+      }
+    }
   }
 
   Component.onCompleted: socket.connected = true
