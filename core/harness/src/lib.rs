@@ -36,6 +36,11 @@ struct Brain {
 
 static BRAIN: Mutex<Option<Arc<Brain>>> = Mutex::new(None);
 
+/// One turn at a time, mirroring the daemon's one-turn-at-a-time contract.
+/// Held across a whole `run`; [`interrupt`] deliberately does not take it,
+/// so barge-in can cancel a turn while it is in flight.
+static TURN: Mutex<()> = Mutex::new(());
+
 /// Marvis's persona, written into the session working directory once. jcode
 /// reads `AGENTS.md` from the session's cwd, so the user can edit it to
 /// reshape her.
@@ -141,6 +146,7 @@ fn activity_line(ev: &ApiEvent) -> Option<String> {
 
 /// Run one conversational turn through jcode. Blocks until the turn ends.
 pub fn run(user_text: &str, mut on_activity: impl FnMut(&str)) -> Result<String, String> {
+    let _turn = TURN.lock().unwrap_or_else(|p| p.into_inner());
     let brain = brain()?;
     let auto = auto_approve();
     let session_id = brain.session.session_id.clone();
@@ -249,5 +255,21 @@ mod tests {
     fn live_turn() {
         let reply = run("Reply with exactly: hello", |_| {}).expect("live turn");
         assert!(reply.to_lowercase().contains("hello"), "got: {reply}");
+    }
+
+    /// Two turns in one session: the second must remember the first. This is
+    /// what we gained by riding jcode sessions instead of stateless calls.
+    #[test]
+    #[ignore = "needs a live jcode runtime"]
+    fn live_memory_across_turns() {
+        let ack = run("Remember this: my favorite color is chartreuse. Reply just: ok", |_| {})
+            .expect("first turn");
+        assert!(ack.to_lowercase().starts_with("ok"), "got: {ack}");
+        let reply = run("What is my favorite color? One word.", |_| {})
+            .expect("second turn");
+        assert!(
+            reply.to_lowercase().contains("chartreuse"),
+            "session lost memory, got: {reply}"
+        );
     }
 }
