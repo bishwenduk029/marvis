@@ -59,7 +59,11 @@ impl Event {
 }
 
 /// Run one full turn. `stop` lets a caller interrupt mid-listening or
-/// mid-speaking.
+/// mid-speaking. In conversation mode (default) she keeps listening after
+/// each reply: half-duplex, so the mic opens only after her voice finished
+/// and she can never hear herself. A silent follow-up window ends the
+/// conversation on its own; clicking while listening ends it immediately.
+/// `MARVIS_CONVERSATION=0` gives one turn per click.
 pub fn run_turn(on_event: impl Fn(&Event) + Send + Sync + 'static, stop: Arc<AtomicBool>) {
     let on_event = Arc::new(on_event);
 
@@ -87,90 +91,141 @@ pub fn run_turn(on_event: impl Fn(&Event) + Send + Sync + 'static, stop: Arc<Ato
         }
     };
 
-    // 1. Listen.
-    emit(Event::State(Phase::Listening));
-    let speech = match marvis_stt::record_speech(emit_energy.clone(), stop.clone()) {
-        Some(s) => s,
-        None => {
-            if !stop.load(Ordering::Relaxed) {
-                speak_error("I didn't catch that.".into(), "I didn't catch that.");
-            } else {
-                emit(Event::State(Phase::Idle));
-            }
-            return;
-        }
-    };
-    if stop.load(Ordering::Relaxed) {
-        emit(Event::State(Phase::Idle));
-        return;
-    }
+    let converse = std::env::var("MARVIS_CONVERSATION")
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "off"))
+        .unwrap_or(true);
+    let mut relisten = false;
 
-    // 2. Understand.
-    emit(Event::State(Phase::Thinking));
-    let text = match marvis_stt::transcribe(&speech.samples, speech.sample_rate) {
-        Ok(t) => t,
-        Err(e) => {
-            speak_error(format!("(stt) {e}"), "I couldn't make out what you said.");
-            return;
-        }
-    };
-    emit(Event::Transcript(text.clone()));
-
-    let reply = {
-        let on_event = on_event.clone();
-        // Barge-in while thinking: stop can fire mid-turn (a new `start` or
-        // `interrupt` command), so a watcher cancels the in-flight jcode turn
-        // instead of waiting for a reply nobody will hear.
-        let done = Arc::new(AtomicBool::new(false));
-        let watcher = {
-            let done = done.clone();
+    loop {
+        // 1. Listen. On follow-up passes, a 30s silent window ends the
+        // conversation: a watchdog flips stop, which record_speech honours.
+        emit(Event::State(Phase::Listening));
+        let watchdog = if relisten {
             let stop = stop.clone();
-            std::thread::spawn(move || {
-                while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                if !done.load(Ordering::Relaxed) {
-                    marvis_harness::interrupt();
-                }
-            })
+            let done = Arc::new(AtomicBool::new(false));
+            let done2 = done.clone();
+            Some((
+                std::thread::spawn(move || {
+                    for _ in 0..300 {
+                        if done2.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+                    stop.store(true, Ordering::Relaxed);
+                }),
+                done,
+            ))
+        } else {
+            None
         };
-        let result = marvis_harness::run(&text, move |line| {
-            if !line.is_empty() {
-                on_event(&Event::Activity(line.to_string()));
+        let speech = match marvis_stt::record_speech(emit_energy.clone(), stop.clone()) {
+            Some(s) => s,
+            None => {
+                if let Some((w, done)) = watchdog {
+                    done.store(true, Ordering::Relaxed);
+                    let _ = w.join();
+                }
+                if relisten {
+                    // Conversation over: silence or a click. Exit quietly.
+                    emit(Event::State(Phase::Idle));
+                    return;
+                }
+                if !stop.load(Ordering::Relaxed) {
+                    speak_error("I didn't catch that.".into(), "I didn't catch that.");
+                } else {
+                    emit(Event::State(Phase::Idle));
+                }
+                return;
             }
-        });
-        done.store(true, Ordering::Relaxed);
-        let _ = watcher.join();
-        // A barge-in during thinking means the user already moved on; don't
-        // speak the stale reply.
+        };
+        if let Some((w, done)) = watchdog {
+            done.store(true, Ordering::Relaxed);
+            let _ = w.join();
+        }
         if stop.load(Ordering::Relaxed) {
             emit(Event::State(Phase::Idle));
             return;
         }
-        match result {
-            Ok(r) => r,
+
+        // 2. Understand.
+        emit(Event::State(Phase::Thinking));
+        let text = match marvis_stt::transcribe(&speech.samples, speech.sample_rate) {
+            Ok(t) => t,
             Err(e) => {
-                speak_error(format!("(brain) {e}"), "Sorry, something went wrong while thinking.");
+                speak_error(format!("(stt) {e}"), "I couldn't make out what you said.");
                 return;
             }
-        }
-    };
-    emit(Event::Reply(reply.clone()));
-    if stop.load(Ordering::Relaxed) {
-        emit(Event::State(Phase::Idle));
-        return;
-    }
+        };
+        emit(Event::Transcript(text.clone()));
 
-    // 3. Speak.
-    emit(Event::State(Phase::Speaking));
-    let utterance = match marvis_tts::synthesize(&reply) {
-        Ok(u) => u,
-        Err(e) => {
-            emit(Event::Reply(format!("(tts) {e}")));
+        let reply = {
+            let on_event = on_event.clone();
+            // Barge-in while thinking: stop can fire mid-turn (a new `start` or
+            // `interrupt` command), so a watcher cancels the in-flight jcode turn
+            // instead of waiting for a reply nobody will hear.
+            let done = Arc::new(AtomicBool::new(false));
+            let watcher = {
+                let done = done.clone();
+                let stop = stop.clone();
+                std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) && !done.load(Ordering::Relaxed) {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    if !done.load(Ordering::Relaxed) {
+                        marvis_harness::interrupt();
+                    }
+                })
+            };
+            let result = marvis_harness::run(&text, move |line| {
+                if !line.is_empty() {
+                    on_event(&Event::Activity(line.to_string()));
+                }
+            });
+            done.store(true, Ordering::Relaxed);
+            let _ = watcher.join();
+            // A barge-in during thinking means the user already moved on; don't
+            // speak the stale reply.
+            if stop.load(Ordering::Relaxed) {
+                emit(Event::State(Phase::Idle));
+                return;
+            }
+            match result {
+                Ok(r) => r,
+                Err(e) => {
+                    speak_error(
+                        format!("(brain) {e}"),
+                        "Sorry, something went wrong while thinking.",
+                    );
+                    return;
+                }
+            }
+        };
+        emit(Event::Reply(reply.clone()));
+        if stop.load(Ordering::Relaxed) {
             emit(Event::State(Phase::Idle));
             return;
         }
-    };
-    marvis_tts::play(&utterance, emit_energy, stop);
+
+        // 3. Speak.
+        emit(Event::State(Phase::Speaking));
+        let utterance = match marvis_tts::synthesize(&reply) {
+            Ok(u) => u,
+            Err(e) => {
+                emit(Event::Reply(format!("(tts) {e}")));
+                emit(Event::State(Phase::Idle));
+                return;
+            }
+        };
+        marvis_tts::play(&utterance, emit_energy.clone(), stop.clone());
+
+        // 4. Conversation: relisten after a short settle so her last words
+        // leave the room before the mic opens (half-duplex anti-echo).
+        if !converse || stop.load(Ordering::Relaxed) {
+            break;
+        }
+        relisten = true;
+        std::thread::sleep(std::time::Duration::from_millis(300));
+    }
     emit(Event::State(Phase::Idle));
 }
